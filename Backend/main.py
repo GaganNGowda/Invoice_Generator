@@ -1,11 +1,11 @@
-# main.py
-from fastapi import FastAPI, File, UploadFile, Request
+from fastapi import FastAPI, File, UploadFile, Request, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from io import BytesIO
 import shutil
 import os
 import requests
+import json # Ensure json is imported if used elsewhere for logging/debug
 
 # Import manager functions
 from customer_manager import find_customer, create_customer
@@ -15,6 +15,10 @@ from zoho_api import get_access_token
 
 # Import routers
 from routes import customer, invoice
+
+# Define GST rate globally for easy adjustment
+GST_RATE = 0.18 # 18% GST (18%)
+PRECISION = 2 # Decimal places for calculations
 
 app = FastAPI()
 
@@ -30,6 +34,7 @@ app.add_middleware(
 # --- Include Routers ---
 app.include_router(customer.router, prefix="/customer", tags=["Customer"])
 app.include_router(invoice.router, prefix="/invoice", tags=["Invoice"])
+
 
 # --- Global Conversation State ---
 conversation_states = {}
@@ -90,23 +95,30 @@ async def download_invoice_pdf_frontend(invoice_id: str):
 async def process(input_data: dict):
     user_message = input_data.get("text")
     session_id = input_data.get("session_id", "default_session")
+    context = input_data.get("context", {})
 
     if not user_message:
         return {"status": "error", "message": "No text provided", "action": "error"}
 
-    response_from_nlp = await process_user_input(user_message, session_id)
+    response_from_nlp = await process_user_input(user_message, session_id, context)
     return response_from_nlp
 
 
 # --- Core Conversational Logic Function ---
-async def process_user_input(text: str, session_id: str):
+async def process_user_input(text: str, session_id: str, incoming_context: dict):
     text_lower = text.lower().strip()
     current_state = conversation_states.get(session_id, {})
+    current_state.update(incoming_context)
+    
     current_customer_data = current_state.get('customer_data', {})
     current_invoice_data = current_state.get('invoice_data', {})
     current_status = current_state.get('status')
     next_field_to_ask = current_state.get('next_field')
     invoice_sub_status = current_state.get('invoice_collection_sub_status')
+    
+    # Store current_state back into global conversation_states
+    conversation_states[session_id] = current_state
+
 
     # --- Handle reset command first ---
     if text_lower == "reset_conversation_command":
@@ -114,7 +126,7 @@ async def process_user_input(text: str, session_id: str):
             del conversation_states[session_id]
         return {"action": "reset_success", "status": "info", "message": "Chat has been reset. How can I help you now?"}
 
-    # --- Handle active customer collection flow ---
+    # --- Handle active customer collection flow (Unchanged from previous simplified version) ---
     if current_status == 'collecting_customer_info':
         if next_field_to_ask == 'phone_lookup':
             phone_number_for_lookup = text.strip()
@@ -135,21 +147,17 @@ async def process_user_input(text: str, session_id: str):
                         current_state['status'] = 'collecting_invoice_info'
                         current_state['next_field'] = 'items'
                         current_state['invoice_collection_sub_status'] = 'asking_item_number'
-                        current_state['customer_data'] = {}
-                        del current_state['return_flow']
-                        del current_state['return_phone']
-
-                        conversation_states[session_id] = current_state
-
+                        current_state['customer_data'] = {} # Reset customer data after successful lookup/creation
+                        current_state.pop('return_flow', None) # Clean up return flow state
+                        current_state.pop('return_phone', None)
+                        
                         all_items = get_items(access_token)
-                        current_state['all_available_items'] = all_items
+                        current_state['all_available_items'] = all_items # Store available items in state
                         if all_items:
-                            # FIX START for SyntaxError
                             items_display_list = [
                                 f"{i + 1}. {item.get('name', 'N/A')} (ID: {item.get('item_id', 'N/A')}, Rate: {item.get('rate', 'N/A')})"
                                 for i, item in enumerate(all_items)
                             ]
-                            # FIX END
                             items_display_message = "\n".join(items_display_list)
                             return {"action": "ask_question", "status": "info",
                                     "message": f"✅ Customer found! Using ID {found_contact_id} for invoice. Now, please select an item by number:\n{items_display_message}",
@@ -159,14 +167,13 @@ async def process_user_input(text: str, session_id: str):
                                     "message": f"✅ Customer found! Using ID {found_contact_id} for invoice. No items found in your Zoho account. What is the item ID?",
                                     "context": current_state}
                     else:
-                        del conversation_states[session_id]
+                        del conversation_states[session_id] # Customer found, end customer creation flow
                         return {"action": "customer_exists", "status": "info",
                                 "message": f"✅ Customer found! Contact ID: {found_contact_id}. How can I help you now?",
                                 "contact_id": found_contact_id}
-                else:
+                else: # Customer not found, proceed to create new customer
                     current_customer_data['phone'] = phone_number_for_lookup
                     current_state['next_field'] = 'first_name'
-                    conversation_states[session_id] = current_state
                     return {"action": "ask_question", "status": "info",
                             "message": "❌ Customer not found with that phone number. Let's create a new one. What is their first name?",
                             "context": current_state}
@@ -179,43 +186,36 @@ async def process_user_input(text: str, session_id: str):
         elif next_field_to_ask == 'first_name':
             current_customer_data['first_name'] = text
             current_state['next_field'] = 'last_name'
-            conversation_states[session_id] = current_state
             return {"action": "ask_question", "status": "info", "message": "What is the customer's last name?",
                     "context": current_state}
         elif next_field_to_ask == 'last_name':
             current_customer_data['last_name'] = text
             current_state['next_field'] = 'salutation'
-            conversation_states[session_id] = current_state
             return {"action": "ask_question", "status": "info", "message": "What is their salutation (Mr./Ms./Dr.)?",
                     "context": current_state}
         elif next_field_to_ask == 'salutation':
             current_customer_data['salutation'] = text
             current_state['next_field'] = 'address'
-            conversation_states[session_id] = current_state
             return {"action": "ask_question", "status": "info", "message": "What is their street address?",
                     "context": current_state}
         elif next_field_to_ask == 'address':
             current_customer_data['address'] = text
             current_state['next_field'] = 'city'
-            conversation_states[session_id] = current_state
             return {"action": "ask_question", "status": "info", "message": "Which city do they live in?",
                     "context": current_state}
         elif next_field_to_ask == 'city':
             current_customer_data['city'] = text
             current_state['next_field'] = 'state'
-            conversation_states[session_id] = current_state
             return {"action": "ask_question", "status": "info", "message": "What is their state?",
                     "context": current_state}
         elif next_field_to_ask == 'state':
             current_customer_data['state'] = text
             current_state['next_field'] = 'zip_code'
-            conversation_states[session_id] = current_state
             return {"action": "ask_question", "status": "info", "message": "What is their ZIP Code?",
                     "context": current_state}
         elif next_field_to_ask == 'zip_code':
             current_customer_data['zip_code'] = text
             current_state['next_field'] = 'phone'
-            conversation_states[session_id] = current_state
             return {"action": "ask_question", "status": "info", "message": "What is their phone number?",
                     "context": current_state}
         elif next_field_to_ask == 'phone':
@@ -229,7 +229,6 @@ async def process_user_input(text: str, session_id: str):
                         "context": current_state}
 
             current_state['next_field'] = 'place_of_contact'
-            conversation_states[session_id] = current_state
             return {"action": "ask_question", "status": "info",
                     "message": "Finally, what is their Place of Contact (e.g., KA for Karnataka)? (Press Enter for default: KA)",
                     "context": current_state}
@@ -291,20 +290,17 @@ async def process_user_input(text: str, session_id: str):
                         current_state['status'] = 'collecting_invoice_info'
                         current_state['next_field'] = 'items'
                         current_state['invoice_collection_sub_status'] = 'asking_item_number'
-                        del current_state['customer_data']
-                        del current_state['return_flow']
-                        del current_state['return_phone']
-
-                        conversation_states[session_id] = current_state
+                        current_state.pop('customer_data', None)
+                        current_state.pop('return_flow', None)
+                        current_state.pop('return_phone', None)
+                        
                         all_items = get_items(access_token)
                         current_state['all_available_items'] = all_items
                         if all_items:
-                            # FIX START
                             items_display_list = [
                                 f"{i + 1}. {item.get('name', 'N/A')} (ID: {item.get('item_id', 'N/A')}, Rate: {item.get('rate', 'N/A')})"
                                 for i, item in enumerate(all_items)
                             ]
-                            # FIX END
                             items_display_message = "\n".join(items_display_list)
                             return {"action": "ask_question", "status": "info",
                                     "message": f"✅ Customer found! Using ID {re_check_contact_id} for invoice. Now, please select an item by number:\n{items_display_message}",
@@ -316,47 +312,44 @@ async def process_user_input(text: str, session_id: str):
                     else:
                         del conversation_states[session_id]
                         return {"action": "customer_exists", "status": "info",
-                                "message": f"✅ Customer already exists with contact ID: {re_check_contact_id}",
+                                "message": f"✅ Customer found! Contact ID: {re_check_contact_id}. How can I help you now?",
                                 "contact_id": re_check_contact_id}
-
-                contact_id = create_customer(customer_payload, access_token)
-                if contact_id:
-                    if current_state.get('return_flow') == 'collecting_invoice_info':
-                        current_invoice_data['customer_id'] = contact_id
-                        current_invoice_data['selected_items'] = current_invoice_data.get('selected_items', [])
-                        current_state['status'] = 'collecting_invoice_info'
-                        current_state['next_field'] = 'items'
-                        current_state['invoice_collection_sub_status'] = 'asking_item_number'
-                        del current_state['customer_data']
-                        del current_state['return_flow']
-                        del current_state['return_phone']
-
-                        conversation_states[session_id] = current_state
-                        all_items = get_items(access_token)
-                        current_state['all_available_items'] = all_items
-                        if all_items:
-                            # FIX START
-                            items_display_list = [
-                                f"{i + 1}. {item.get('name', 'N/A')} (ID: {item.get('item_id', 'N/A')}, Rate: {item.get('rate', 'N/A')})"
-                                for i, item in enumerate(all_items)
-                            ]
-                            # FIX END
-                            items_display_message = "\n".join(items_display_list)
-                            return {"action": "ask_question", "status": "info",
-                                    "message": f"✅ New customer created with ID {contact_id}. Using this for invoice. Now, please select an item by number:\n{items_display_message}",
-                                    "context": current_state}
+                else:
+                    contact_id = create_customer(customer_payload, access_token)
+                    if contact_id:
+                        if current_state.get('return_flow') == 'collecting_invoice_info':
+                            current_invoice_data['customer_id'] = contact_id
+                            current_invoice_data['selected_items'] = current_invoice_data.get('selected_items', [])
+                            current_state['status'] = 'collecting_invoice_info'
+                            current_state['next_field'] = 'items'
+                            current_state['invoice_collection_sub_status'] = 'asking_item_number'
+                            current_state.pop('customer_data', None)
+                            current_state.pop('return_flow', None)
+                            current_state.pop('return_phone', None)
+                            
+                            all_items = get_items(access_token)
+                            current_state['all_available_items'] = all_items
+                            if all_items:
+                                items_display_list = [
+                                    f"{i + 1}. {item.get('name', 'N/A')} (ID: {item.get('item_id', 'N/A')}, Rate: {item.get('rate', 'N/A')})"
+                                    for i, item in enumerate(all_items)
+                                ]
+                                items_display_message = "\n".join(items_display_list)
+                                return {"action": "ask_question", "status": "info",
+                                        "message": f"✅ New customer created with ID {contact_id}. Using this for invoice. Now, please select an item by number:\n{items_display_message}",
+                                        "context": current_state}
+                            else:
+                                return {"action": "ask_question", "status": "warning",
+                                        "message": f"✅ New customer created with ID {contact_id}. Using this for invoice. No items found in your Zoho account. What is the item ID?",
+                                        "context": current_state}
                         else:
-                            return {"action": "ask_question", "status": "warning",
-                                    "message": f"✅ New customer created with ID {contact_id}. Using this for invoice. No items found in your Zoho account. What is the item ID?",
-                                    "context": current_state}
+                            del conversation_states[session_id]
+                            return {"action": "customer_created", "status": "success",
+                                    "message": f"✅ New customer created with contact ID: {contact_id}",
+                                    "contact_id": contact_id}
                     else:
                         del conversation_states[session_id]
-                        return {"action": "customer_created", "status": "success",
-                                "message": f"✅ New customer created with contact ID: {contact_id}",
-                                "contact_id": contact_id}
-                else:
-                    del conversation_states[session_id]
-                    return {"action": "customer_creation_failed", "status": "error",
+                        return {"action": "customer_creation_failed", "status": "error",
                             "message": "❌ Failed to create customer."}
             except Exception as e:
                 del conversation_states[session_id]
@@ -364,7 +357,8 @@ async def process_user_input(text: str, session_id: str):
                         "message": f"An error occurred during customer creation/lookup: {e}"}
 
         return {"action": "general_response", "status": "error",
-                "message": "I'm still collecting customer details, but I didn't understand that. Please provide the specific information requested."}
+                "message": f"I'm still collecting customer details. Please provide the customer's {next_field_to_ask}.",
+                "context": current_state}
 
     # --- Handle active invoice collection flow ---
     if current_status == 'collecting_invoice_info':
@@ -386,18 +380,14 @@ async def process_user_input(text: str, session_id: str):
                     current_state['next_field'] = 'items'
                     current_state['invoice_collection_sub_status'] = 'asking_item_number'
 
-                    conversation_states[session_id] = current_state
-
                     all_items = get_items(access_token)
                     current_state['all_available_items'] = all_items
 
                     if all_items:
-                        # FIX START
                         items_display_list = [
                             f"{i + 1}. {item.get('name', 'N/A')} (ID: {item.get('item_id', 'N/A')}, Rate: {item.get('rate', 'N/A')})"
                             for i, item in enumerate(all_items)
                         ]
-                        # FIX END
                         items_display_message = "\n".join(items_display_list)
                         return {"action": "ask_question", "status": "info",
                                 "message": f"✅ Customer found! Using ID {found_contact_id} for invoice. Now, please select an item by number:\n{items_display_message}",
@@ -413,7 +403,6 @@ async def process_user_input(text: str, session_id: str):
                     current_state['return_flow'] = 'collecting_invoice_info'
                     current_state['return_phone'] = phone_number_for_invoice
 
-                    conversation_states[session_id] = current_state
                     return {"action": "ask_question", "status": "info",
                             "message": "❌ Customer not found with that phone number. Let's create a new customer first. What is their first name?",
                             "context": current_state}
@@ -432,8 +421,8 @@ async def process_user_input(text: str, session_id: str):
                         selected_item = all_available_items[item_index]
                         current_state['current_item_id'] = selected_item['item_id']
                         current_state['current_item_name'] = selected_item['name']
+                        current_state['current_item_rate'] = selected_item['rate'] # Store item's rate
                         current_state['invoice_collection_sub_status'] = 'asking_item_quantity'
-                        conversation_states[session_id] = current_state
                         return {"action": "ask_question", "status": "info",
                                 "message": f"How many '{selected_item['name']}' do you need?",
                                 "context": current_state}
@@ -454,14 +443,15 @@ async def process_user_input(text: str, session_id: str):
 
                     item_id = current_state['current_item_id']
                     item_name = current_state['current_item_name']
+                    item_rate = current_state['current_item_rate'] # Retrieve item rate
 
                     current_invoice_data['selected_items'].append({
                         "item_id": item_id,
-                        "quantity": quantity
+                        "quantity": quantity,
+                        "rate": item_rate # Store rate with the selected item
                     })
 
                     current_state['invoice_collection_sub_status'] = 'ask_more_items'
-                    conversation_states[session_id] = current_state
                     return {"action": "ask_question", "status": "info",
                             "message": f"Added {quantity} x '{item_name}'. Do you want to add another item? (yes/no or y/n)",
                             "context": current_state}
@@ -473,25 +463,33 @@ async def process_user_input(text: str, session_id: str):
             elif invoice_sub_status == 'ask_more_items':
                 if text_lower in ['yes', 'y']:
                     current_state['invoice_collection_sub_status'] = 'asking_item_number'
-                    conversation_states[session_id] = current_state
                     items_display_list = []
                     all_available_items = current_state.get('all_available_items', [])
                     for i, item in enumerate(all_available_items):
-                        # FIX START
                         items_display_list.append(
                             f"{i + 1}. {item.get('name', 'N/A')} (ID: {item.get('item_id', 'N/A')}, Rate: {item.get('rate', 'N/A')})"
                         )
-                        # FIX END
                     items_display_message = "\n".join(items_display_list)
                     return {"action": "ask_question", "status": "info",
                             "message": f"Okay, select next item by number:\n{items_display_message}",
                             "context": current_state}
                 elif text_lower in ['no', 'n']:
-                    current_state['next_field'] = 'city_cf'
-                    current_state['invoice_collection_sub_status'] = None
-                    conversation_states[session_id] = current_state
+                    # After adding all items, ask for the total amount
+                    current_state['next_field'] = 'total_amount'
+                    current_state['invoice_collection_sub_status'] = None # Reset sub_status
+
+                    # Calculate the current subtotal and total with GST
+                    calculated_subtotal = sum(item['quantity'] * item['rate'] for item in current_invoice_data['selected_items'])
+                    calculated_gst_amount = round(calculated_subtotal * GST_RATE, PRECISION)
+                    calculated_total_with_gst = round(calculated_subtotal + calculated_gst_amount, PRECISION)
+                    
+                    current_state['calculated_subtotal'] = calculated_subtotal
+                    current_state['calculated_gst_amount'] = calculated_gst_amount
+                    current_state['calculated_total_with_gst'] = calculated_total_with_gst
+
                     return {"action": "ask_question", "status": "info",
-                            "message": "What is the city for the custom field?", "context": current_state}
+                            "message": f"Okay, I have recorded your items. The calculated subtotal is {calculated_subtotal:.2f}, GST ({GST_RATE*100}%) is {calculated_gst_amount:.2f}, making the calculated total: **{calculated_total_with_gst:.2f}**. What is the final total amount you expect for this invoice?",
+                            "context": current_state}
                 else:
                     return {"action": "ask_question", "status": "error",
                             "message": "Please respond with 'yes' or 'no' (y/n). Do you want to add another item?",
@@ -499,19 +497,112 @@ async def process_user_input(text: str, session_id: str):
 
             else:  # Fallback for unexpected sub-status during items collection
                 return {"action": "general_response", "status": "error",
-                        "message": "I'm in the middle of item collection, but something went wrong. Please try restarting invoice creation or specify the item number."}
+                        "message": "I'm in the middle of item collection, but something went wrong. Please try restarting invoice creation or specify the item number.",
+                        "context": current_state}
+        
+        # --- NEW LOGIC: Handle Total Amount Input and DIRECT Adjustment ---
+        elif next_field_to_ask == 'total_amount':
+            try:
+                provided_total = float(text.strip())
+                if provided_total <= 0:
+                    raise ValueError("Total amount must be positive.")
+                
+                calculated_total_with_gst = current_state.get('calculated_total_with_gst', 0.0)
+                
+                difference = round(provided_total - calculated_total_with_gst, PRECISION)
+
+                if abs(difference) < 0.01: # Use a small epsilon for floating point comparison
+                    # Amounts match, proceed to custom fields
+                    current_invoice_data['final_total_override'] = provided_total # Store the final total for invoice_manager
+                    current_state['next_field'] = 'city_cf'
+                    # Clear calculation-related state
+                    current_state.pop('calculated_subtotal', None)
+                    current_state.pop('calculated_gst_amount', None)
+                    current_state.pop('calculated_total_with_gst', None)
+                    current_state.pop('provided_total_amount', None)
+                    
+                    return {"action": "ask_question", "status": "info",
+                            "message": f"Total amount matches! Proceeding with invoice creation. What is the city for the custom field?",
+                            "context": current_state}
+                else:
+                    # Amounts do not match, DIRECTLY ADJUST prices (skip confirmation)
+                    provided_total_amount_from_state = current_state.get('provided_total_amount') # This would be provided_total from current turn
+                    calculated_subtotal_from_items = current_state.get('calculated_subtotal') # Base subtotal from current items
+
+                    # Use provided_total (current input) for adjustment, not provided_total_amount_from_state
+                    # provided_total = text.strip() # Already converted to float at top of this block
+
+                    if provided_total is None or calculated_subtotal_from_items is None: # Use current provided_total here
+                        return {"action": "general_response", "status": "error",
+                                "message": "Error in adjustment logic (missing initial total or subtotal). Please try re-entering the total amount.",
+                                "context": current_state}
+
+                    # Calculate the desired subtotal needed to reach 'provided_total' after GST
+                    # This is the base amount that, when GST is added, results in provided_total
+                    desired_subtotal_from_provided_total = round(provided_total / (1 + GST_RATE), PRECISION + 4) # Use higher precision for intermediate calculation
+                    
+                    adjusted_items = []
+                    if calculated_subtotal_from_items == 0:
+                        # If original subtotal is zero, and user provides a total,
+                        # we cannot proportionately adjust rates. We must apply the total as a final override.
+                        print(f"WARNING: Calculated subtotal is zero, cannot adjust item rates proportionately. Final invoice total will be forced to {provided_total:.2f}.")
+                        current_invoice_data['final_total_override'] = provided_total # Store the provided total
+                        current_state['next_field'] = 'city_cf'
+                        # Clear calculation-related state
+                        current_state.pop('calculated_subtotal', None)
+                        current_state.pop('calculated_gst_amount', None)
+                        current_state.pop('calculated_total_with_gst', None)
+                        current_state.pop('provided_total_amount', None) # Clear it
+                        
+                        return {"action": "ask_question", "status": "info",
+                                "message": f"Calculated subtotal was zero. Cannot adjust individual item prices proportionately. Using provided total **{provided_total:.2f}** for the invoice. What is the city for the custom field?",
+                                "context": current_state}
+                    
+                    # Calculate the scaling factor for item rates based on desired subtotal
+                    scaling_factor = desired_subtotal_from_provided_total / calculated_subtotal_from_items
+
+                    adjusted_items_for_zoho = []
+                    for item in current_invoice_data['selected_items']:
+                        original_rate = item['rate']
+                        adjusted_rate = round(original_rate * scaling_factor, PRECISION + 2) # Apply scaling, higher precision for sending to Zoho
+                        adjusted_items_for_zoho.append({
+                            "item_id": item['item_id'],
+                            "quantity": item['quantity'],
+                            "rate": adjusted_rate # Update rate to adjusted rate
+                        })
+                    
+                    current_invoice_data['selected_items'] = adjusted_items_for_zoho # Update selected_items with adjusted rates
+                    current_invoice_data['final_total_override'] = provided_total # Store the provided total for invoice_manager to use as the final total
+                    
+                    current_state['next_field'] = 'city_cf'
+                    # Clear all calculation/adjustment related state
+                    current_state.pop('calculated_subtotal', None)
+                    current_state.pop('calculated_gst_amount', None)
+                    current_state.pop('calculated_total_with_gst', None)
+                    current_state.pop('provided_total_amount', None) # Clear it
+
+                    return {"action": "ask_question", "status": "info",
+                            "message": f"Item prices have been adjusted to match the total **{provided_total:.2f}**. Proceeding to custom fields. What is the city for the custom field?",
+                            "context": current_state}
+
+            except ValueError:
+                return {"action": "ask_question", "status": "error",
+                        "message": "Invalid total amount. Please enter a valid number.",
+                        "context": current_state}
+        
+        # --- REMOVED THE 'adjust_prices_confirmation' BLOCK AS PER USER REQUEST ---
+        # elif next_field_to_ask == 'adjust_prices_confirmation':
+        #    ... (this entire block is removed) ...
 
         elif next_field_to_ask == 'city_cf':
             current_invoice_data['city_cf'] = text.strip()
             current_state['next_field'] = 'code_cf'
-            conversation_states[session_id] = current_state
             return {"action": "ask_question", "status": "info",
                     "message": "What is the total items code for the custom field?", "context": current_state}
 
         elif next_field_to_ask == 'code_cf':
             current_invoice_data['code_cf'] = text.strip()
             current_state['next_field'] = 'vehicle_cf'
-            conversation_states[session_id] = current_state
             return {"action": "ask_question", "status": "info",
                     "message": "What is the vehicle number for the custom field? (Optional, press Enter to skip)",
                     "context": current_state}
@@ -521,19 +612,23 @@ async def process_user_input(text: str, session_id: str):
 
             try:
                 access_token = get_access_token()
+                
+                # Retrieve the total amount to send to Zoho's create_invoice
+                final_total_for_zoho = current_invoice_data.get('final_total_override')
+                
                 invoice_id = create_invoice(
                     current_invoice_data['customer_id'],
-                    current_invoice_data['selected_items'],
+                    current_invoice_data['selected_items'], # This now contains adjusted rates if applicable
                     access_token,
                     current_invoice_data.get('city_cf', ''),
                     current_invoice_data.get('code_cf', ''),
-                    current_invoice_data.get('vehicle_cf', '')
+                    current_invoice_data.get('vehicle_cf', ''),
+                    final_total_amount=final_total_for_zoho # Pass the final desired total to invoice_manager
                 )
                 if invoice_id:
-                    # Return PDF download URL to frontend
                     backend_base_url = os.getenv("BACKEND_BASE_URL", "http://localhost:8000")
                     pdf_download_url = f"{backend_base_url}/download-invoice-pdf/{invoice_id}"
-                    del conversation_states[session_id]
+                    del conversation_states[session_id] # Clear session on completion
                     return {"action": "invoice_created", "status": "success",
                             "message": f"✅ Invoice created successfully with ID: {invoice_id}.",
                             "invoice_id": invoice_id,
@@ -547,8 +642,10 @@ async def process_user_input(text: str, session_id: str):
                 return {"action": "invoice_creation_error", "status": "error",
                         "message": f"An error occurred during invoice creation: {e}"}
 
+        # Fallback for invoice info collection
         return {"action": "general_response", "status": "error",
-                "message": "I'm still collecting invoice details, but I didn't understand that. Please try restarting the invoice creation."}
+                "message": f"I'm still collecting invoice details. Please provide the {next_field_to_ask}.",
+                "context": current_state}
 
     # --- Handle initial intents if no active conversation flow ---
     if "show items" in text_lower or "list items" in text_lower or "what items" in text_lower:
