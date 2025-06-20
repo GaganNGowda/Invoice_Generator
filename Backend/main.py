@@ -15,6 +15,7 @@ from zoho_api import get_access_token
 
 # Import routers
 from routes import customer, invoice
+from i18n_utils import t # Import the translation utility
 
 # Define GST rate globally for easy adjustment
 GST_RATE = 0.18 # 18% GST (18%)
@@ -43,7 +44,7 @@ conversation_states = {}
 # --- Root Endpoint ---
 @app.get("/")
 def read_root():
-    return {"message": "Backend is running!"}
+    return {"message": t("backend_running", language="en")} # Use English for root, or determine based on header if needed
 
 
 # --- Endpoint to serve PDF to frontend ---
@@ -98,7 +99,7 @@ async def process(input_data: dict):
     context = input_data.get("context", {})
 
     if not user_message:
-        return {"status": "error", "message": "No text provided", "action": "error"}
+        return {"status": "error", "message": t("no_text_provided", language=context.get("language", "kn")), "action": "error"}
 
     response_from_nlp = await process_user_input(user_message, session_id, context)
     return response_from_nlp
@@ -106,9 +107,14 @@ async def process(input_data: dict):
 
 # --- Core Conversational Logic Function ---
 async def process_user_input(text: str, session_id: str, incoming_context: dict):
-    text_lower = text.lower().strip()
+    # Set the language from incoming context, default to Kannada ('kn')
+    language = incoming_context.get("language", "kn")
+    
     current_state = conversation_states.get(session_id, {})
     current_state.update(incoming_context)
+    current_state['language'] = language # Store language in current state
+
+    text_lower = text.lower().strip()
     
     current_customer_data = current_state.get('customer_data', {})
     current_invoice_data = current_state.get('invoice_data', {})
@@ -124,7 +130,8 @@ async def process_user_input(text: str, session_id: str, incoming_context: dict)
     if text_lower == "reset_conversation_command":
         if session_id in conversation_states:
             del conversation_states[session_id]
-        return {"action": "reset_success", "status": "info", "message": "Chat has been reset. How can I help you now?"}
+        return {"action": "reset_success", "status": "info", 
+                "message": t("reset_success", language=language), "context": current_state}
 
     # --- Handle active customer collection flow (Unchanged from previous simplified version) ---
     if current_status == 'collecting_customer_info':
@@ -133,7 +140,7 @@ async def process_user_input(text: str, session_id: str, incoming_context: dict)
             if not phone_number_for_lookup.isdigit() and not phone_number_for_lookup.replace('+', '').replace(' ',
                                                                                                               '').isdigit():
                 return {"action": "ask_question", "status": "error",
-                        "message": "Invalid phone number format. Please enter a valid phone number (digits only, or with '+' and spaces).",
+                        "message": t("invalid_phone_format", language=language),
                         "context": current_state}
 
             try:
@@ -160,63 +167,63 @@ async def process_user_input(text: str, session_id: str, incoming_context: dict)
                             ]
                             items_display_message = "\n".join(items_display_list)
                             return {"action": "ask_question", "status": "info",
-                                    "message": f"✅ Customer found! Using ID {found_contact_id} for invoice. Now, please select an item by number:\n{items_display_message}",
+                                    "message": t("customer_found_for_invoice", language=language, contact_id=found_contact_id, items_display_message=items_display_message),
                                     "context": current_state}
                         else:
                             return {"action": "ask_question", "status": "warning",
-                                    "message": f"✅ Customer found! Using ID {found_contact_id} for invoice. No items found in your Zoho account. What is the item ID?",
+                                    "message": t("customer_found_for_invoice_no_items", language=language, contact_id=found_contact_id),
                                     "context": current_state}
                     else:
                         del conversation_states[session_id] # Customer found, end customer creation flow
                         return {"action": "customer_exists", "status": "info",
-                                "message": f"✅ Customer found! Contact ID: {found_contact_id}. How can I help you now?",
+                                "message": t("customer_exists", language=language, contact_id=found_contact_id),
                                 "contact_id": found_contact_id}
                 else: # Customer not found, proceed to create new customer
                     current_customer_data['phone'] = phone_number_for_lookup
                     current_state['next_field'] = 'first_name'
                     return {"action": "ask_question", "status": "info",
-                            "message": "❌ Customer not found with that phone number. Let's create a new one. What is their first name?",
+                            "message": t("customer_not_found_create", language=language),
                             "context": current_state}
             except Exception as e:
                 del conversation_states[session_id]
                 return {"action": "customer_lookup_error", "status": "error",
-                        "message": f"An error occurred during customer lookup: {e}. Please try again.",
+                        "message": t("customer_lookup_error", language=language, error_message=str(e)),
                         "context": current_state}
 
         elif next_field_to_ask == 'first_name':
             current_customer_data['first_name'] = text
             current_state['next_field'] = 'last_name'
-            return {"action": "ask_question", "status": "info", "message": "What is the customer's last name?",
+            return {"action": "ask_question", "status": "info", "message": t("ask_last_name", language=language),
                     "context": current_state}
         elif next_field_to_ask == 'last_name':
             current_customer_data['last_name'] = text
             current_state['next_field'] = 'salutation'
-            return {"action": "ask_question", "status": "info", "message": "What is their salutation (Mr./Ms./Dr.)?",
+            return {"action": "ask_question", "status": "info", "message": t("ask_salutation", language=language),
                     "context": current_state}
         elif next_field_to_ask == 'salutation':
             current_customer_data['salutation'] = text
             current_state['next_field'] = 'address'
-            return {"action": "ask_question", "status": "info", "message": "What is their street address?",
+            return {"action": "ask_question", "status": "info", "message": t("ask_address", language=language),
                     "context": current_state}
         elif next_field_to_ask == 'address':
             current_customer_data['address'] = text
             current_state['next_field'] = 'city'
-            return {"action": "ask_question", "status": "info", "message": "Which city do they live in?",
+            return {"action": "ask_question", "status": "info", "message": t("ask_city", language=language),
                     "context": current_state}
         elif next_field_to_ask == 'city':
             current_customer_data['city'] = text
             current_state['next_field'] = 'state'
-            return {"action": "ask_question", "status": "info", "message": "What is their state?",
+            return {"action": "ask_question", "status": "info", "message": t("ask_state", language=language),
                     "context": current_state}
         elif next_field_to_ask == 'state':
             current_customer_data['state'] = text
             current_state['next_field'] = 'zip_code'
-            return {"action": "ask_question", "status": "info", "message": "What is their ZIP Code?",
+            return {"action": "ask_question", "status": "info", "message": t("ask_zip_code", language=language),
                     "context": current_state}
         elif next_field_to_ask == 'zip_code':
             current_customer_data['zip_code'] = text
             current_state['next_field'] = 'phone'
-            return {"action": "ask_question", "status": "info", "message": "What is their phone number?",
+            return {"action": "ask_question", "status": "info", "message": t("ask_phone", language=language),
                     "context": current_state}
         elif next_field_to_ask == 'phone':
             if 'phone' not in current_customer_data or (text.strip() and (
@@ -225,12 +232,12 @@ async def process_user_input(text: str, session_id: str, incoming_context: dict)
 
             if not current_customer_data.get('phone', '').strip().isdigit():
                 return {"action": "ask_question", "status": "error",
-                        "message": "Invalid phone number. Please enter a valid phone number (digits only).",
+                        "message": t("invalid_phone_number", language=language),
                         "context": current_state}
 
             current_state['next_field'] = 'place_of_contact'
             return {"action": "ask_question", "status": "info",
-                    "message": "Finally, what is their Place of Contact (e.g., KA for Karnataka)? (Press Enter for default: KA)",
+                    "message": t("ask_place_of_contact", language=language),
                     "context": current_state}
         elif next_field_to_ask == 'place_of_contact':
             current_customer_data['place_of_contact'] = text if text else "KA"
@@ -303,16 +310,16 @@ async def process_user_input(text: str, session_id: str, incoming_context: dict)
                             ]
                             items_display_message = "\n".join(items_display_list)
                             return {"action": "ask_question", "status": "info",
-                                    "message": f"✅ Customer found! Using ID {re_check_contact_id} for invoice. Now, please select an item by number:\n{items_display_message}",
+                                    "message": t("customer_found_for_invoice", language=language, contact_id=re_check_contact_id, items_display_message=items_display_message),
                                     "context": current_state}
                         else:
                             return {"action": "ask_question", "status": "warning",
-                                    "message": f"✅ Customer found! Using ID {re_check_contact_id} for invoice. No items found in your Zoho account. What is the item ID?",
+                                    "message": t("customer_found_for_invoice_no_items", language=language, contact_id=re_check_contact_id),
                                     "context": current_state}
                     else:
                         del conversation_states[session_id]
                         return {"action": "customer_exists", "status": "info",
-                                "message": f"✅ Customer found! Contact ID: {re_check_contact_id}. How can I help you now?",
+                                "message": t("customer_exists", language=language, contact_id=re_check_contact_id),
                                 "contact_id": re_check_contact_id}
                 else:
                     contact_id = create_customer(customer_payload, access_token)
@@ -336,28 +343,28 @@ async def process_user_input(text: str, session_id: str, incoming_context: dict)
                                 ]
                                 items_display_message = "\n".join(items_display_list)
                                 return {"action": "ask_question", "status": "info",
-                                        "message": f"✅ New customer created with ID {contact_id}. Using this for invoice. Now, please select an item by number:\n{items_display_message}",
+                                        "message": t("customer_found_for_invoice", language=language, contact_id=contact_id, items_display_message=items_display_message),
                                         "context": current_state}
                             else:
                                 return {"action": "ask_question", "status": "warning",
-                                        "message": f"✅ New customer created with ID {contact_id}. Using this for invoice. No items found in your Zoho account. What is the item ID?",
+                                        "message": t("customer_found_for_invoice_no_items", language=language, contact_id=contact_id),
                                         "context": current_state}
                         else:
                             del conversation_states[session_id]
                             return {"action": "customer_created", "status": "success",
-                                    "message": f"✅ New customer created with contact ID: {contact_id}",
+                                    "message": t("customer_created", language=language, contact_id=contact_id),
                                     "contact_id": contact_id}
                     else:
                         del conversation_states[session_id]
                         return {"action": "customer_creation_failed", "status": "error",
-                            "message": "❌ Failed to create customer."}
+                            "message": t("customer_creation_failed", language=language)}
             except Exception as e:
                 del conversation_states[session_id]
                 return {"action": "customer_creation_error", "status": "error",
-                        "message": f"An error occurred during customer creation/lookup: {e}"}
+                        "message": t("customer_creation_error", language=language, error_message=str(e))}
 
         return {"action": "general_response", "status": "error",
-                "message": f"I'm still collecting customer details. Please provide the customer's {next_field_to_ask}.",
+                "message": t("collecting_customer_details_fallback", language=language, next_field=next_field_to_ask),
                 "context": current_state}
 
     # --- Handle active invoice collection flow ---
@@ -367,7 +374,7 @@ async def process_user_input(text: str, session_id: str, incoming_context: dict)
             if not phone_number_for_invoice.isdigit() and not phone_number_for_invoice.replace('+', '').replace(' ',
                                                                                                                 '').isdigit():
                 return {"action": "ask_question", "status": "error",
-                        "message": "Invalid phone number format. Please enter a valid phone number for the customer (digits only, or with '+' and spaces).",
+                        "message": t("invalid_phone_format", language=language),
                         "context": current_state}
 
             try:
@@ -390,11 +397,11 @@ async def process_user_input(text: str, session_id: str, incoming_context: dict)
                         ]
                         items_display_message = "\n".join(items_display_list)
                         return {"action": "ask_question", "status": "info",
-                                "message": f"✅ Customer found! Using ID {found_contact_id} for invoice. Now, please select an item by number:\n{items_display_message}",
+                                "message": t("customer_found_for_invoice", language=language, contact_id=found_contact_id, items_display_message=items_display_message),
                                 "context": current_state}
                     else:
                         return {"action": "ask_question", "status": "warning",
-                                "message": f"✅ Customer found! Using ID {found_contact_id} for invoice. No items found in your Zoho account. What is the item ID?",
+                                "message": t("customer_found_for_invoice_no_items", language=language, contact_id=found_contact_id),
                                 "context": current_state}
                 else:
                     current_state['status'] = 'collecting_customer_info'
@@ -404,12 +411,12 @@ async def process_user_input(text: str, session_id: str, incoming_context: dict)
                     current_state['return_phone'] = phone_number_for_invoice
 
                     return {"action": "ask_question", "status": "info",
-                            "message": "❌ Customer not found with that phone number. Let's create a new customer first. What is their first name?",
+                            "message": t("customer_not_found_create", language=language),
                             "context": current_state}
             except Exception as e:
                 del conversation_states[session_id]
                 return {"action": "customer_lookup_error", "status": "error",
-                        "message": f"An error occurred during customer lookup for invoice: {e}. Please try again.",
+                        "message": t("customer_lookup_error", language=language, error_message=str(e)),
                         "context": current_state}
 
         elif next_field_to_ask == 'items':
@@ -424,15 +431,15 @@ async def process_user_input(text: str, session_id: str, incoming_context: dict)
                         current_state['current_item_rate'] = selected_item['rate'] # Store item's rate
                         current_state['invoice_collection_sub_status'] = 'asking_item_quantity'
                         return {"action": "ask_question", "status": "info",
-                                "message": f"How many '{selected_item['name']}' do you need?",
+                                "message": t("ask_quantity", language=language, item_name=selected_item['name']),
                                 "context": current_state}
                     else:
                         return {"action": "ask_question", "status": "error",
-                                "message": "Invalid item number. Please select an item from the list by its number.",
+                                "message": t("invalid_item_number", language=language),
                                 "context": current_state}
                 except ValueError:
                     return {"action": "ask_question", "status": "error",
-                            "message": "Please enter a valid number for the item selection.",
+                            "message": t("enter_valid_number", language=language),
                             "context": current_state}
 
             elif invoice_sub_status == 'asking_item_quantity':
@@ -453,15 +460,15 @@ async def process_user_input(text: str, session_id: str, incoming_context: dict)
 
                     current_state['invoice_collection_sub_status'] = 'ask_more_items'
                     return {"action": "ask_question", "status": "info",
-                            "message": f"Added {quantity} x '{item_name}'. Do you want to add another item? (yes/no or y/n)",
+                            "message": t("item_added_ask_more", language=language, quantity=quantity, item_name=item_name),
                             "context": current_state}
                 except ValueError:
                     return {"action": "ask_question", "status": "error",
-                            "message": "Invalid quantity. Please enter a whole number greater than zero.",
+                            "message": t("invalid_quantity", language=language),
                             "context": current_state}
 
             elif invoice_sub_status == 'ask_more_items':
-                if text_lower in ['yes', 'y']:
+                if text_lower in ['yes', 'y', t("yes", language=language).lower(), t("y", language=language).lower()]: # Added translation check
                     current_state['invoice_collection_sub_status'] = 'asking_item_number'
                     items_display_list = []
                     all_available_items = current_state.get('all_available_items', [])
@@ -471,9 +478,9 @@ async def process_user_input(text: str, session_id: str, incoming_context: dict)
                         )
                     items_display_message = "\n".join(items_display_list)
                     return {"action": "ask_question", "status": "info",
-                            "message": f"Okay, select next item by number:\n{items_display_message}",
+                            "message": t("ask_more_items_prompt", language=language, items_display_message=items_display_message),
                             "context": current_state}
-                elif text_lower in ['no', 'n']:
+                elif text_lower in ['no', 'n', t("no", language=language).lower(), t("n", language=language).lower()]: # Added translation check
                     # After adding all items, ask for the total amount
                     current_state['next_field'] = 'total_amount'
                     current_state['invoice_collection_sub_status'] = None # Reset sub_status
@@ -488,16 +495,20 @@ async def process_user_input(text: str, session_id: str, incoming_context: dict)
                     current_state['calculated_total_with_gst'] = calculated_total_with_gst
 
                     return {"action": "ask_question", "status": "info",
-                            "message": f"Okay, I have recorded your items. The calculated subtotal is {calculated_subtotal:.2f}, GST ({GST_RATE*100}%) is {calculated_gst_amount:.2f}, making the calculated total: **{calculated_total_with_gst:.2f}**. What is the final total amount you expect for this invoice?",
+                            "message": t("ask_total_amount", language=language, 
+                                        calculated_subtotal=calculated_subtotal, 
+                                        gst_rate_percent=GST_RATE*100, 
+                                        calculated_gst_amount=calculated_gst_amount, 
+                                        calculated_total_with_gst=calculated_total_with_gst),
                             "context": current_state}
                 else:
                     return {"action": "ask_question", "status": "error",
-                            "message": "Please respond with 'yes' or 'no' (y/n). Do you want to add another item?",
+                            "message": t("yes_no_prompt", language=language),
                             "context": current_state}
 
             else:  # Fallback for unexpected sub-status during items collection
                 return {"action": "general_response", "status": "error",
-                        "message": "I'm in the middle of item collection, but something went wrong. Please try restarting invoice creation or specify the item number.",
+                        "message": t("item_collection_error", language=language),
                         "context": current_state}
         
         # --- NEW LOGIC: Handle Total Amount Input and DIRECT Adjustment ---
@@ -522,7 +533,7 @@ async def process_user_input(text: str, session_id: str, incoming_context: dict)
                     current_state.pop('provided_total_amount', None)
                     
                     return {"action": "ask_question", "status": "info",
-                            "message": f"Total amount matches! Proceeding with invoice creation. What is the city for the custom field?",
+                            "message": t("total_amount_matches_proceed_custom_fields", language=language),
                             "context": current_state}
                 else:
                     # Amounts do not match, DIRECTLY ADJUST prices (skip confirmation)
@@ -534,7 +545,7 @@ async def process_user_input(text: str, session_id: str, incoming_context: dict)
 
                     if provided_total is None or calculated_subtotal_from_items is None: # Use current provided_total here
                         return {"action": "general_response", "status": "error",
-                                "message": "Error in adjustment logic (missing initial total or subtotal). Please try re-entering the total amount.",
+                                "message": t("adjustment_error_missing_data", language=language),
                                 "context": current_state}
 
                     # Calculate the desired subtotal needed to reach 'provided_total' after GST
@@ -555,7 +566,7 @@ async def process_user_input(text: str, session_id: str, incoming_context: dict)
                         current_state.pop('provided_total_amount', None) # Clear it
                         
                         return {"action": "ask_question", "status": "info",
-                                "message": f"Calculated subtotal was zero. Cannot adjust individual item prices proportionately. Using provided total **{provided_total:.2f}** for the invoice. What is the city for the custom field?",
+                                "message": t("calculated_subtotal_zero_adjust_total", language=language, provided_total=provided_total),
                                 "context": current_state}
                     
                     # Calculate the scaling factor for item rates based on desired subtotal
@@ -582,12 +593,12 @@ async def process_user_input(text: str, session_id: str, incoming_context: dict)
                     current_state.pop('provided_total_amount', None) # Clear it
 
                     return {"action": "ask_question", "status": "info",
-                            "message": f"Item prices have been adjusted to match the total **{provided_total:.2f}**. Proceeding to custom fields. What is the city for the custom field?",
+                            "message": t("item_prices_adjusted_proceed_custom_fields", language=language, provided_total=provided_total),
                             "context": current_state}
 
             except ValueError:
                 return {"action": "ask_question", "status": "error",
-                        "message": "Invalid total amount. Please enter a valid number.",
+                        "message": t("invalid_total_amount", language=language),
                         "context": current_state}
         
         # --- REMOVED THE 'adjust_prices_confirmation' BLOCK AS PER USER REQUEST ---
@@ -598,13 +609,13 @@ async def process_user_input(text: str, session_id: str, incoming_context: dict)
             current_invoice_data['city_cf'] = text.strip()
             current_state['next_field'] = 'code_cf'
             return {"action": "ask_question", "status": "info",
-                    "message": "What is the total items code for the custom field?", "context": current_state}
+                    "message": t("ask_code_cf", language=language), "context": current_state}
 
         elif next_field_to_ask == 'code_cf':
             current_invoice_data['code_cf'] = text.strip()
             current_state['next_field'] = 'vehicle_cf'
             return {"action": "ask_question", "status": "info",
-                    "message": "What is the vehicle number for the custom field? (Optional, press Enter to skip)",
+                    "message": t("ask_vehicle_cf", language=language),
                     "context": current_state}
 
         elif next_field_to_ask == 'vehicle_cf':
@@ -630,21 +641,21 @@ async def process_user_input(text: str, session_id: str, incoming_context: dict)
                     pdf_download_url = f"{backend_base_url}/download-invoice-pdf/{invoice_id}"
                     del conversation_states[session_id] # Clear session on completion
                     return {"action": "invoice_created", "status": "success",
-                            "message": f"✅ Invoice created successfully with ID: {invoice_id}.",
+                            "message": t("invoice_created", language=language, invoice_id=invoice_id),
                             "invoice_id": invoice_id,
                             "pdf_url": pdf_download_url}
                 else:
                     del conversation_states[session_id]
                     return {"action": "invoice_creation_failed", "status": "error",
-                            "message": "❌ Failed to create invoice."}
+                            "message": t("invoice_creation_failed", language=language)}
             except Exception as e:
                 del conversation_states[session_id]
                 return {"action": "invoice_creation_error", "status": "error",
-                        "message": f"An error occurred during invoice creation: {e}"}
+                        "message": t("invoice_creation_error", language=language, error_message=str(e))}
 
         # Fallback for invoice info collection
         return {"action": "general_response", "status": "error",
-                "message": f"I'm still collecting invoice details. Please provide the {next_field_to_ask}.",
+                "message": t("collecting_customer_details_fallback", language=language, next_field=next_field_to_ask), # Reusing for invoice flow as well
                 "context": current_state}
 
     # --- Handle initial intents if no active conversation flow ---
@@ -657,51 +668,66 @@ async def process_user_input(text: str, session_id: str, incoming_context: dict)
                     [f"- {item.get('name', 'N/A')} (ID: {item.get('item_id', 'N/A')}, Rate: {item.get('rate', 'N/A')})"
                      for item in items])
                 return {"action": "list_items", "status": "success",
-                        "message": f"Here are your items:\n{items_display}", "data": items}
+                        "message": t("list_items_success", language=language, items_display=items_display), "data": items}
             else:
                 return {"action": "list_items", "status": "info",
-                        "message": "No items found in your Zoho Invoice account."}
+                        "message": t("no_items_found", language=language)}
         except Exception as e:
-            return {"action": "list_items", "status": "error", "message": f"Failed to fetch items: {e}"}
+            return {"action": "list_items", "status": "error", "message": t("failed_to_fetch_items", language=language, error_message=str(e))}
 
     if "create customer" in text_lower:
         conversation_states[session_id] = {
             'status': 'collecting_customer_info',
             'next_field': 'phone_lookup',
-            'customer_data': {}
+            'customer_data': {},
+            'language': language # Ensure language is carried forward
         }
         return {"action": "ask_question", "status": "info",
-                "message": "Okay, let's find or create a customer. What is their phone number?",
+                "message": t("create_customer_prompt", language=language),
                 "context": conversation_states[session_id]}
 
     if "create invoice" in text_lower:
+        print(f"DEBUG: Matched 'create invoice' intent.")
         conversation_states[session_id] = {
             'status': 'collecting_invoice_info',
             'next_field': 'customer_phone_for_invoice',
-            'invoice_data': {'selected_items': []}
+            'invoice_data': {'selected_items': []},
+            'language': language # This should ensure 'kn' is saved
         }
+        print(f"DEBUG: Updated state for 'create invoice': {conversation_states[session_id]}")
+        print(f"DEBUG: Calling t('create_invoice_prompt', language={language})")
         return {"action": "ask_question", "status": "info",
-                "message": "Okay, let's create an invoice. What is the customer's phone number?",
+                "message": t("create_invoice_prompt", language=language), # THIS is the line to confirm
                 "context": conversation_states[session_id]}
-
-    # Default response if no specific intent is matched
-    return {"action": "general_response", "status": "info",
-            "message": f"You said: '{text}'. I'm still learning to understand complex requests. How else can I help with invoices?"}
 
 
 # --- File Upload Endpoint (unchanged) ---
+# main.py
+
+# ... (other imports and code) ...
+
+# --- File Upload Endpoint (unchanged from functional perspective, but syntax fixed) ---
 @app.post("/upload-document")
-async def upload_document(file: UploadFile = File(...)):
+async def upload_document(request: Request, file: UploadFile = File(...)): # Moved request before file
+    language = "kn" # Default language for file upload, can be extracted from headers if available
+    if request.headers.get("accept-language"):
+        # This is a very basic way to get language from headers, you might need a more robust parsing
+        # For simplicity, let's just take the first part of the header
+        header_lang = request.headers.get("accept-language").split(',')[0].strip().lower()
+        if header_lang in ["en", "kn"]:
+            language = header_lang
+
     try:
         upload_dir = "uploaded_files"
         os.makedirs(upload_dir, exist_ok=True)
         file_location = os.path.join(upload_dir, file.filename)
         with open(file_location, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
-        return {"status": "success", "message": f"File '{file.filename}' uploaded successfully!",
+        return {"status": "success", "message": t("file_uploaded_success", language=language, file_name=file.filename),
                 "action": "file_uploaded", "file_path": file_location}
     except Exception as e:
-        return {"status": "error", "message": f"Failed to upload file: {e}", "action": "error"}
+        return {"status": "error", "message": t("failed_to_upload_file", language=language, error_message=str(e)), "action": "error"}
+
 
 
 # The `main()` function is a standalone script and should not interfere with FastAPI.
