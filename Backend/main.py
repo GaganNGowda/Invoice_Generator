@@ -133,7 +133,6 @@ async def process_user_input(text: str, session_id: str, incoming_context: dict)
         return {"action": "reset_success", "status": "info", 
                 "message": t("reset_success", language=language), "context": current_state}
 
-    # --- Handle active customer collection flow (Unchanged from previous simplified version) ---
     if current_status == 'collecting_customer_info':
         if next_field_to_ask == 'phone_lookup':
             phone_number_for_lookup = text.strip()
@@ -179,7 +178,7 @@ async def process_user_input(text: str, session_id: str, incoming_context: dict)
                                 "message": t("customer_exists", language=language, contact_id=found_contact_id),
                                 "contact_id": found_contact_id}
                 else: # Customer not found, proceed to create new customer
-                    current_customer_data['phone'] = phone_number_for_lookup
+                    current_customer_data['phone'] = phone_number_for_lookup # This correctly pre-fills the phone number
                     current_state['next_field'] = 'first_name'
                     return {"action": "ask_question", "status": "info",
                             "message": t("customer_not_found_create", language=language),
@@ -201,7 +200,29 @@ async def process_user_input(text: str, session_id: str, incoming_context: dict)
             return {"action": "ask_question", "status": "info", "message": t("ask_salutation", language=language),
                     "context": current_state}
         elif next_field_to_ask == 'salutation':
-            current_customer_data['salutation'] = text
+            # Normalize input: strip whitespace and convert to lowercase for comparison
+            salutation_input_lower = text.strip().lower()
+            
+            # Standardize common salutations
+            if salutation_input_lower == 'mr':
+                current_customer_data['salutation'] = 'Mr.'
+            elif salutation_input_lower == 'ms':
+                current_customer_data['salutation'] = 'Ms.'
+            elif salutation_input_lower == 'dr':
+                current_customer_data['salutation'] = 'Dr.'
+            elif salutation_input_lower == 'mrs': # Commonly requested, adding for completeness
+                current_customer_data['salutation'] = 'Mrs.'
+            elif salutation_input_lower == 'prof': # Commonly requested, adding for completeness
+                current_customer_data['salutation'] = 'Prof.'
+            else:
+                # For any other input, or if it's empty, title-case it (e.g., "sir" -> "Sir")
+                # This is a general fallback, ensure it fits your desired behavior for unrecognized salutations.
+                current_customer_data['salutation'] = text.strip().title()
+
+            current_state['next_field'] = 'address'
+            return {"action": "ask_question", "status": "info", "message": t("ask_address", language=language),
+                    "context": current_state}
+
             current_state['next_field'] = 'address'
             return {"action": "ask_question", "status": "info", "message": t("ask_address", language=language),
                     "context": current_state}
@@ -222,28 +243,18 @@ async def process_user_input(text: str, session_id: str, incoming_context: dict)
                     "context": current_state}
         elif next_field_to_ask == 'zip_code':
             current_customer_data['zip_code'] = text
-            current_state['next_field'] = 'phone'
-            return {"action": "ask_question", "status": "info", "message": t("ask_phone", language=language),
-                    "context": current_state}
-        elif next_field_to_ask == 'phone':
-            if 'phone' not in current_customer_data or (text.strip() and (
-                    not current_customer_data['phone'] or current_customer_data['phone'] != text.strip())):
-                current_customer_data['phone'] = text.strip()
-
-            if not current_customer_data.get('phone', '').strip().isdigit():
-                return {"action": "ask_question", "status": "error",
-                        "message": t("invalid_phone_number", language=language),
-                        "context": current_state}
-
-            current_state['next_field'] = 'place_of_contact'
+            # Directly move to 'place_of_contact' after zip_code, skipping the redundant 'phone' ask
+            current_state['next_field'] = 'place_of_contact' 
             return {"action": "ask_question", "status": "info",
-                    "message": t("ask_place_of_contact", language=language),
+                    "message": t("ask_place_of_contact", language=language), # This message now follows zip_code
                     "context": current_state}
+        # REMOVED THE 'elif next_field_to_ask == 'phone':' BLOCK ENTIRELY
+
         elif next_field_to_ask == 'place_of_contact':
-            current_customer_data['place_of_contact'] = text if text else "KA"
+            # Convert text to uppercase if it's not empty, otherwise default to "KA"
+            current_customer_data['place_of_contact'] = text.upper() if text else "KA"
 
             full_name = f"{current_customer_data.get('salutation', '')} {current_customer_data.get('first_name', '')} {current_customer_data['last_name']}".strip()
-
             customer_payload = {
                 "contact_name": full_name,
                 "contact_type": "customer",
