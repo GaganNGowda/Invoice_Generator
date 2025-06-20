@@ -51,13 +51,11 @@ def create_invoice(customer_id: str, selected_items: list, access_token: str, ci
         # Removed custom_fields section as per error: "A custom field with the label City doesnot exist."
         # If you later create these custom fields in Zoho, you can re-add this section
         # with the exact labels from your Zoho account.
-        # "custom_fields": [
-        #     {"label": "City", "value": city_cf},
-        #     {"label": "Code", "value": code_cf},
-        #     {"label": "Vehicle No", "value": vehicle_cf}
-        # ],
-        # "total": final_total_amount # Only include if Zoho API for invoices has a 'total' field
-                                    # that overrides line item sum. More often you would apply discounts.
+        "custom_fields": [
+            {"customfield_id": "2286520000000029794", "value": city_cf},
+            {"customfield_id": "2286520000000131080","value": code_cf},
+            {"customfield_id": "2286520000000136037", "value": vehicle_cf}
+        ]
     }
     
     headers = {
