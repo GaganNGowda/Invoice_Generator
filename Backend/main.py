@@ -6,7 +6,6 @@ import shutil
 import os
 import requests
 import json # Ensure json is imported if used elsewhere for logging/debug
-
 # Import manager functions
 from customer_manager import find_customer, create_customer
 from item_manager import get_items
@@ -22,7 +21,6 @@ GST_RATE = 0.18 # 18% GST (18%)
 PRECISION = 2 # Decimal places for calculations
 
 app = FastAPI()
-
 # --- CORS Middleware ---
 app.add_middleware(
     CORSMiddleware,
@@ -35,13 +33,9 @@ app.add_middleware(
 # --- Include Routers ---
 app.include_router(customer.router, prefix="/customer", tags=["Customer"])
 app.include_router(invoice.router, prefix="/invoice", tags=["Invoice"])
-
-
 # --- Global Conversation State ---
 conversation_states = {}
 
-
-# --- Root Endpoint ---
 @app.get("/")
 def read_root():
     return {"message": t("backend_running", language="en")} # Use English for root, or determine based on header if needed
@@ -269,7 +263,8 @@ async def process_user_input(text: str, session_id: str, incoming_context: dict)
                     "address": current_customer_data['address'],
                     "state": current_customer_data['state'],
                     "zip": current_customer_data['zip_code'],
-                    "phone": current_customer_data['phone']
+                    "phone": current_customer_data['phone'],
+                    "mobile":current_customer_data['phone']
                 },
                 "shipping_address": {
                     "country": "India",
@@ -277,7 +272,8 @@ async def process_user_input(text: str, session_id: str, incoming_context: dict)
                     "address": current_customer_data['address'],
                     "state": current_customer_data['state'],
                     "zip": current_customer_data['zip_code'],
-                    "phone": current_customer_data['phone']
+                    "phone": current_customer_data['phone'],
+                    "mobile":current_customer_data['phone']
                 },
                 "contact_persons": [
                     {
